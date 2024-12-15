@@ -24,6 +24,159 @@ const SEARXNG_MAX_RESULTS = Math.max(
 
 const CACHE_TTL = 3600 // Cache time-to-live in seconds (1 hour)
 const CACHE_EXPIRATION_CHECK_INTERVAL = 3600000 // 1 hour in milliseconds
+const SIMILARITY_THRESHOLD = 0.8 // Threshold for considering queries similar
+const MAX_SIMILAR_CACHE_ENTRIES = 5 // Maximum number of similar queries to check
+
+interface CacheMetadata {
+  query: string
+  timestamp: number
+  normalizedQuery: string
+}
+
+// Function to normalize a query for better cache matching
+function normalizeQuery(query: string): string {
+  return query
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?\s+]/g, ' ') // Replace punctuation and excess spaces
+    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+    .trim()
+}
+
+// Calculate similarity between two strings using Levenshtein distance
+function calculateSimilarity(str1: string, str2: string): number {
+  const longer = str1.length > str2.length ? str1 : str2
+  const shorter = str1.length > str2.length ? str2 : str1
+  if (longer.length === 0) return 1.0
+
+  const costs: number[] = Array.from(
+    { length: shorter.length + 1 },
+    (_, i) => i
+  )
+  for (let i = 0; i < longer.length; i++) {
+    let lastValue = i + 1
+    for (let j = 0; j < shorter.length; j++) {
+      if (i === 0) costs[j] = j + 1
+      else {
+        if (j > 0) {
+          let newValue = costs[j - 1]
+          if (longer[i] !== shorter[j])
+            newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1
+          costs[j - 1] = lastValue
+          lastValue = newValue
+        }
+      }
+    }
+    if (i > 0) costs[shorter.length] = lastValue
+  }
+  return (
+    (longer.length - costs[shorter.length - 1]) / parseFloat(longer.length + '')
+  )
+}
+
+// Function to get cached results with similarity matching
+async function getCachedResults(
+  cacheKey: string,
+  originalQuery: string
+): Promise<SearXNGSearchResults | null> {
+  try {
+    const client = await initializeRedisClient()
+    if (!client) return null
+
+    // First, try exact match
+    let cachedData: string | null = null
+    if (client instanceof Redis) {
+      cachedData = await client.get(cacheKey)
+    } else {
+      cachedData = await client.get(cacheKey)
+    }
+
+    if (cachedData) {
+      console.log(`Exact cache hit for key: ${cacheKey}`)
+      return JSON.parse(cachedData)
+    }
+
+    // If no exact match, try to find similar queries
+    const normalizedQuery = normalizeQuery(originalQuery)
+    const allKeys = await client.keys('search:*')
+    const metadataPromises = allKeys.map(async key => {
+      const metadata = await (
+        client.get as (key: string) => Promise<string | null>
+      )(`${key}:metadata`)
+      return metadata ? (JSON.parse(metadata) as CacheMetadata) : null
+    })
+    const allMetadata = (await Promise.all(metadataPromises)).filter(
+      (m): m is CacheMetadata => m !== null
+    )
+
+    // Find the most similar cached query
+    let bestMatch: { key: string; similarity: number } | null = null
+    for (const metadata of allMetadata) {
+      const similarity = calculateSimilarity(
+        normalizedQuery,
+        metadata.normalizedQuery
+      )
+      if (
+        similarity > SIMILARITY_THRESHOLD &&
+        (!bestMatch || similarity > bestMatch.similarity)
+      ) {
+        bestMatch = {
+          key: `search:${metadata.query}`,
+          similarity
+        }
+      }
+    }
+
+    if (bestMatch) {
+      console.log(
+        `Similar cache hit for query "${originalQuery}" using "${bestMatch.key}" (similarity: ${bestMatch.similarity})`
+      )
+      const similarCachedData = await (
+        client.get as (key: string) => Promise<string | null>
+      )(bestMatch.key)
+      return similarCachedData ? JSON.parse(similarCachedData) : null
+    }
+
+    console.log(`Cache miss for key: ${cacheKey}`)
+    return null
+  } catch (error) {
+    console.error('Redis cache error:', error)
+    return null
+  }
+}
+
+// Function to set cached results with metadata
+async function setCachedResults(
+  cacheKey: string,
+  results: SearXNGSearchResults,
+  originalQuery: string
+): Promise<void> {
+  try {
+    const client = await initializeRedisClient()
+    if (!client) return
+
+    const serializedResults = JSON.stringify(results)
+    const metadata: CacheMetadata = {
+      query: originalQuery,
+      timestamp: Date.now(),
+      normalizedQuery: normalizeQuery(originalQuery)
+    }
+
+    if (client instanceof Redis) {
+      await client.set(cacheKey, serializedResults, { ex: CACHE_TTL })
+      await client.set(`${cacheKey}:metadata`, JSON.stringify(metadata), {
+        ex: CACHE_TTL
+      })
+    } else {
+      await client.set(cacheKey, serializedResults, { EX: CACHE_TTL })
+      await client.set(`${cacheKey}:metadata`, JSON.stringify(metadata), {
+        EX: CACHE_TTL
+      })
+    }
+    console.log(`Cached results for key: ${cacheKey}`)
+  } catch (error) {
+    console.error('Redis cache error:', error)
+  }
+}
 
 let redisClient: Redis | ReturnType<typeof createClient> | null = null
 
@@ -51,55 +204,6 @@ async function initializeRedisClient() {
   }
 
   return redisClient
-}
-
-// Function to get cached results
-async function getCachedResults(
-  cacheKey: string
-): Promise<SearXNGSearchResults | null> {
-  try {
-    const client = await initializeRedisClient()
-    if (!client) return null
-
-    let cachedData: string | null
-    if (client instanceof Redis) {
-      cachedData = await client.get(cacheKey)
-    } else {
-      cachedData = await client.get(cacheKey)
-    }
-
-    if (cachedData) {
-      console.log(`Cache hit for key: ${cacheKey}`)
-      return JSON.parse(cachedData)
-    } else {
-      console.log(`Cache miss for key: ${cacheKey}`)
-      return null
-    }
-  } catch (error) {
-    console.error('Redis cache error:', error)
-    return null
-  }
-}
-
-// Function to set cached results with error handling and logging
-async function setCachedResults(
-  cacheKey: string,
-  results: SearXNGSearchResults
-): Promise<void> {
-  try {
-    const client = await initializeRedisClient()
-    if (!client) return
-
-    const serializedResults = JSON.stringify(results)
-    if (client instanceof Redis) {
-      await client.set(cacheKey, serializedResults, { ex: CACHE_TTL })
-    } else {
-      await client.set(cacheKey, serializedResults, { EX: CACHE_TTL })
-    }
-    console.log(`Cached results for key: ${cacheKey}`)
-  } catch (error) {
-    console.error('Redis cache error:', error)
-  }
 }
 
 // Function to periodically clean up expired cache entries
@@ -131,41 +235,78 @@ export async function POST(request: Request) {
   const SEARXNG_DEFAULT_DEPTH = process.env.SEARXNG_DEFAULT_DEPTH || 'basic'
 
   try {
-    const cacheKey = `search:${query}:${maxResults}:${searchDepth}:${
-      Array.isArray(includeDomains) ? includeDomains.join(',') : ''
-    }:${Array.isArray(excludeDomains) ? excludeDomains.join(',') : ''}`
+    const cacheKey = `search:${query}`
 
-    // Try to get cached results
-    const cachedResults = await getCachedResults(cacheKey)
+    // Try to get cached results with similarity matching
+    const cachedResults = await getCachedResults(cacheKey, query)
     if (cachedResults) {
-      return NextResponse.json(cachedResults)
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(JSON.stringify(cachedResults)))
+          controller.close()
+        }
+      })
+      return new Response(stream, {
+        headers: { 'Content-Type': 'application/json' }
+      })
     }
 
-    // If not cached, perform the search
-    const results = await advancedSearchXNGSearch(
-      query,
-      Math.min(maxResults, SEARXNG_MAX_RESULTS),
-      searchDepth || SEARXNG_DEFAULT_DEPTH,
-      Array.isArray(includeDomains) ? includeDomains : [],
-      Array.isArray(excludeDomains) ? excludeDomains : []
-    )
+    // If not cached, create a streaming response
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const results = await advancedSearchXNGSearch(
+            query,
+            Math.min(maxResults, SEARXNG_MAX_RESULTS),
+            searchDepth || SEARXNG_DEFAULT_DEPTH,
+            Array.isArray(includeDomains) ? includeDomains : [],
+            Array.isArray(excludeDomains) ? excludeDomains : []
+          )
 
-    // Cache the results
-    await setCachedResults(cacheKey, results)
+          // Cache the results
+          await setCachedResults(cacheKey, results, query)
 
-    return NextResponse.json(results)
+          // Send the results
+          controller.enqueue(encoder.encode(JSON.stringify(results)))
+          controller.close()
+        } catch (error) {
+          controller.enqueue(
+            encoder.encode(
+              JSON.stringify({
+                message: 'Internal Server Error',
+                error: error instanceof Error ? error.message : String(error),
+                query: query,
+                results: [],
+                images: [],
+                number_of_results: 0
+              })
+            )
+          )
+          controller.close()
+        }
+      }
+    })
+
+    return new Response(stream, {
+      headers: { 'Content-Type': 'application/json' }
+    })
   } catch (error) {
     console.error('Advanced search error:', error)
-    return NextResponse.json(
-      {
+    return new Response(
+      JSON.stringify({
         message: 'Internal Server Error',
         error: error instanceof Error ? error.message : String(error),
         query: query,
         results: [],
         images: [],
         number_of_results: 0
-      },
-      { status: 500 }
+      }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      }
     )
   }
 }

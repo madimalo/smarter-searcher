@@ -43,21 +43,15 @@ export const models: Model[] = [
     providerId: 'groq'
   },
   {
+    id: 'llama3-groq-70b-8192-tool-use-preview',
+    name: 'LLama 3 Groq 70B Tool Use',
+    provider: 'Groq',
+    providerId: 'groq'
+  },
+  {
     id: 'qwen2.5',
     name: 'Qwen 2.5',
     provider: 'Ollama',
     providerId: 'ollama'
-  },
-  {
-    id: process.env.NEXT_PUBLIC_AZURE_DEPLOYMENT_NAME || 'undefined',
-    name: process.env.NEXT_PUBLIC_AZURE_DEPLOYMENT_NAME || 'Undefined',
-    provider: 'Azure',
-    providerId: 'azure'
-  },
-  {
-    id: process.env.NEXT_PUBLIC_OPENAI_COMPATIBLE_MODEL || 'undefined',
-    name: process.env.NEXT_PUBLIC_OPENAI_COMPATIBLE_MODEL || 'Undefined',
-    provider: 'OpenAI Compatible',
-    providerId: 'openai-compatible'
   }
 ]
