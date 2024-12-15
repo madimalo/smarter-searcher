@@ -31,8 +31,8 @@ export const models: Model[] = [
     providerId: 'anthropic'
   },
   {
-    id: 'gemini-1.5-pro-002',
-    name: 'Gemini 1.5 Pro',
+    id: 'gemini-2.0-flash-exp',
+    name: 'Gemini 2.0 Flash Experimental',
     provider: 'Google Generative AI',
     providerId: 'google'
   },

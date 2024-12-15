@@ -1,6 +1,6 @@
-# This is a Docker Compose file for setting up the morphic-stack environment.
+# This is a Docker Compose file for setting up the smarter-searcher environment.
 
-name: morphic-stack
+name: smarter-searcher
 services:
   morphic:
     build:
